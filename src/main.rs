@@ -16,6 +16,7 @@ struct CrdtOperation {
     action: String,
     op_id: String,
     timestamp: i64,  // Timestamp is needed for conflict resolution
+    vector_clock: HashMap<String, i64>,
 }
 
 // Here is a table of clients
@@ -24,10 +25,11 @@ type Clients = Arc<Mutex<HashMap<String, Client>>>;
 
 #[tokio::main]
 async fn main() {
-    let listener = TcpListener::bind("127.0.0.1:8080").await.expect("Failed to bind server");
-    println!("Server listening on port 8080");
+    let listener = TcpListener::bind("138.68.93.15:8910").await.expect("Failed to bind server");
+    println!("Server listening on port 8910");
 
     let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
+    let operations: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
     // Just to be able to shut down this whole thing
     let shutdown_signal = signal::ctrl_c();
@@ -40,12 +42,13 @@ async fn main() {
             let (write, read) = ws_stream.split();
             let (tx, rx) = mpsc::unbounded_channel();
             let clients_inner = clients.clone();
+            let operations_inner = operations.clone();
 
             let client_id = format!("Client_{}", generate_unique_id()); 
             clients.lock().unwrap().insert(client_id.clone(), tx);
 
             tokio::spawn(handle_messages(rx, write));
-            tokio::spawn(read_messages(read, clients_inner, client_id));
+            tokio::spawn(read_messages(read, clients_inner, operations_inner, client_id));
         }
     };
 
@@ -61,14 +64,18 @@ async fn main() {
     println!("Server is shutting down...");
 }
 
-async fn read_messages(mut read: SplitStream<WebSocketStream<TcpStream>>, clients: Clients, client_id: String) {
+async fn read_messages(mut read: SplitStream<WebSocketStream<TcpStream>>, clients: Clients, operations: Arc<Mutex<HashSet<String>>>,  client_id: String) {
     while let Some(Ok(message)) = read.next().await {
         match message {
             Message::Text(text) => {
                 println!("Received message from {}: {}", client_id, text);
                 if let Ok(operation) = serde_json::from_str::<CrdtOperation>(&text) {
                     println!("Operation received: {:?}", operation);
-                    send_operation(operation, &clients).await;
+                    let mut ops = operations.lock().unwrap();
+                    if !ops.contains(&operation.op_id) {
+                        ops.insert(operation.op_id.clone());
+                        send_operation(operation, &clients).await;
+                    }
                 } else {
                     println!("Failed to parse message into CrdtOperation: {}", text);
                 }
